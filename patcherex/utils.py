@@ -185,7 +185,7 @@ class ASMConverter(object):
                 if base_reg is None: raise ASMConverterError('Unsupported base register "%s"' % part_0)
                 index_reg = ASMConverter.reg_to_att(part_1)
                 if index_reg is None: raise ASMConverterError('Unsupported index register "%s"' % part_1)
-                
+
                 disp = str((int(part_2,base=0)))
 
                 if sign_2 == '-':
@@ -372,7 +372,7 @@ class ASMConverter(object):
 
     @staticmethod
     def intel_to_att(asm):
-        
+
         # convert each line from intel syntax to AT&T syntax
 
         converted = []
@@ -539,6 +539,21 @@ def exe_type(tstr):
         return None
 
 
+def pflags_to_perms(p_flags):
+    pf_x = (1 << 0)
+    pf_w = (1 << 1)
+    pf_r = (1 << 2)
+
+    perms = ""
+    if p_flags & pf_r:
+        perms += "R"
+    if p_flags & pf_w:
+        perms += "W"
+    if p_flags & pf_x:
+        perms += "X"
+    return perms
+
+
 @contextlib.contextmanager
 def tempdir(prefix='/tmp/python_tmp', delete=True):
     # A context manager for creating and then deleting a temporary directory.
@@ -560,7 +575,7 @@ def exec_cmd(args, cwd=None, shell=False, debug=False):
     std = p.communicate()
     retcode = p.poll()
     res = (std[0], std[1], retcode)
-    
+
     if debug:
         print("RESULT:", repr(res))
 
@@ -651,14 +666,14 @@ def compile_asm(code, base=None, name_map=None):
     with tempdir() as td:
         asm_fname = os.path.join(td, "asm.s")
         bin_fname = os.path.join(td, "bin.o")
-        
+
         fp = open(asm_fname, 'wb')
         fp.write(b"bits 32\n")
         if base is not None:
             fp.write(bytes("org %#x\n" % base, "utf-8"))
         fp.write(bytes(code, "utf-8"))
         fp.close()
-        
+
         res = exec_cmd("nasm -o %s %s" % (bin_fname, asm_fname), shell=True)
         if res[2] != 0:
             print("NASM error:")

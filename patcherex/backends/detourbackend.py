@@ -2,12 +2,14 @@
 import os
 import bisect
 import logging
+import IPython
 from collections import OrderedDict
 from collections import defaultdict
 
 from patcherex.patches import *
 
 from ..backend import Backend
+from .segment import ELFHeader, SegmentHeader
 from .misc import ASM_ENTRY_POINT_PUSH_ENV, ASM_ENTRY_POINT_RESTORE_ENV
 
 l = logging.getLogger("patcherex.backends.DetourBackend")
@@ -18,6 +20,8 @@ symbols will look like {}
 """
 
 # http://stackoverflow.com/questions/4999233/how-to-raise-error-if-duplicates-keys-in-dictionary
+
+
 class RejectingDict(dict):
     def __setitem__(self, k, v):
         if k in self:
@@ -32,20 +36,26 @@ class RejectingDict(dict):
 class PatchingException(Exception):
     pass
 
+
 class MissingBlockException(PatchingException):
     pass
+
 
 class DetourException(PatchingException):
     pass
 
+
 class DoubleDetourException(PatchingException):
     pass
+
 
 class InvalidVAddrException(PatchingException):
     pass
 
+
 class IncompatiblePatchesException(PatchingException):
     pass
+
 
 class DuplicateLabelsException(PatchingException):
     pass
@@ -53,9 +63,9 @@ class DuplicateLabelsException(PatchingException):
 
 class DetourBackend(Backend):
     # how do we want to design this to track relocations in the blocks...
-    def __init__(self, filename, data_fallback=None,try_pdf_removal=True):
+    def __init__(self, filename, data_fallback=None, try_pdf_removal=True):
 
-        super(DetourBackend, self).__init__(filename,try_pdf_removal)
+        super(DetourBackend, self).__init__(filename, try_pdf_removal)
 
         self.cfg = self._generate_cfg()
         self.ordered_nodes = self._get_ordered_nodes(self.cfg)
@@ -75,7 +85,7 @@ class DetourBackend(Backend):
         self.added_data_segment = 0x07000000
         self.single_segment_header_size = 32
         # we may need up to 3 additional segments (1 for pdf removal 2 for patching)
-        self.additional_headers_size = 3*self.single_segment_header_size 
+        self.additional_headers_size = 3*self.single_segment_header_size
 
         self.added_code = b""
         self.added_data = b""
@@ -92,9 +102,9 @@ class DetourBackend(Backend):
         self.touched_bytes = set()
         self.modded_segments = self.dump_segments()
 
-        if self.try_pdf_removal == True:
+        if self.try_pdf_removal is True:
             l.info("Trying to remove the pdf from the binary")
-            should_remove_pdf, pdf_start, pdf_length, check_instruction_addr, check_instruction_size  = self.find_pdf()
+            should_remove_pdf, pdf_start, pdf_length, check_instruction_addr, check_instruction_size = self.find_pdf()
             if should_remove_pdf:
                 l.info("Removing the pdf from the binary")
                 self.remove_pdf(pdf_start, pdf_length, check_instruction_addr, check_instruction_size)
@@ -104,20 +114,24 @@ class DetourBackend(Backend):
         else:
             l.info("Forced not to remove the pdf from the binary")
 
-        # we reused existing data segment if it is the last one in the file, otherwise we use the fallback solution
-        if data_fallback == None:
+        # we reused existing data segment if it is the last one in the file
+        # otherwise we use the fallback solution
+        if data_fallback is None:
             last_segment = self.modded_segments[-1]
-            # TODO if not global rw data in the original program, this segment is not here
-            # for now I assume it will be always here in reasonable programs
-            if self.pflags_to_perms(last_segment[-2]) == "RW":
+            '''
+            TODO if not global rw data in the original program, this segment
+            is not here
+            For now I assume it will be always here in reasonable programs
+            '''
+            if self.pflags_to_perms(last_segment.p_flags) == "RW":
                 #check that this is actually the last one in the file and no one is overlapping
                 # p_type, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_flags, p_align
-                max_file_start = max([s[1] for s in self.modded_segments[:-1]])
-                max_file_end = max([s[1]+s[4] for s in self.modded_segments[:-1]])
-                if max_file_start < last_segment[1] and max_file_end <= last_segment[1]+last_segment[4]:
+                max_file_start = max([s.p_offset for s in self.modded_segments[:-1]])
+                max_file_end = max([s.p_offset+s.p_filesz for s in self.modded_segments[:-1]])
+                if max_file_start < last_segment.p_offset and max_file_end <= last_segment.p_offset+last_segment.p_filesz:
                     l.info("Using standard method for RW memory. " \
                             "Existing RW segment: %08x -> %08x, Previous segment: %08x -> %08x" % \
-                            (last_segment[1],last_segment[1]+last_segment[4],max_file_start,max_file_end))
+                            (last_segment.p_offset,last_segment.p_offset+last_segment.p_filesz,max_file_start,max_file_end))
                     self.data_fallback = False
                 else:
                     l.info("Using fallback method for RW memory.")
@@ -134,12 +148,12 @@ class DetourBackend(Backend):
             self.name_map["ADDED_DATA_START"] = (len(self.ncontent) % 0x1000) + self.added_data_segment
         else:
             last_segment = self.modded_segments[-1]
-            # at the end of the file there is stuff which is supposely not loaded in memory 
+            # at the end of the file there is stuff which is supposely not loaded in memory
             # but it is present in the file (e.g., segment headers)
             # we need to account for that
-            self.real_size_last_segment = len(self.ncontent) - last_segment[1]  
+            self.real_size_last_segment = len(self.ncontent) - last_segment.p_offset
             # this is the start in memory of RWData
-            self.name_map["ADDED_DATA_START"] = last_segment[2] + last_segment[5]
+            self.name_map["ADDED_DATA_START"] = last_segment.p_vaddr + last_segment.p_memsz
 
     def find_pdf(self):
         # 1) check if the pdf string is there and get the length
@@ -228,13 +242,13 @@ class DetourBackend(Backend):
         instructions = utils.disassemble(self.read_mem_from_file(checker_function_start, 0x30), checker_function_start)
         if not expected_instructions == [instruction.mnemonic for instruction in instructions]:
             l.warning("unexpected instructions in checker function")
-            return False, None, None, None, None  
+            return False, None, None, None, None
 
         # 7) check for pdf acceses from cfg
         if False: # TODO, see issue: https://git.seclab.cs.ucsb.edu/cgc/patcherex/issues
             l.warning("unexpected acceses to the pdf")
             return False, None, None, None, None
-            
+
         return True, pdf_beginning_pos, pdf_length, instructions[3].address, len(instructions[3].bytes)
 
     def remove_pdf(self, pdf_start, pdf_length, check_instruction_addr, check_instruction_size):
@@ -288,7 +302,7 @@ class DetourBackend(Backend):
     def is_patched(self):
         return self.ncontent[0x34:0x34 + len(self.patched_tag)] == self.patched_tag
 
-    def setup_headers(self,segments):
+    def setup_headers(self, segments):
         if self.is_patched():
             return
 
@@ -297,7 +311,7 @@ class DetourBackend(Backend):
         # change pointer to program headers to point at the end of the elf
         self.ncontent = utils.bytes_overwrite(self.ncontent, struct.pack("<I", len(self.ncontent)), 0x1C)
 
-        # copying original program headers (potentially modified by patches and/or pdf removal) 
+        # copying original program headers (potentially modified by patches and/or pdf removal)
         # in the new place (at the  end of the file)
         for segment in segments:
             self.ncontent = utils.bytes_overwrite(self.ncontent, struct.pack("<IIIIIIII", *segment))
@@ -313,36 +327,16 @@ class DetourBackend(Backend):
         self.ncontent = self.ncontent.ljust(len(self.ncontent)+self.additional_headers_size, b"\x00")
 
     def dump_segments(self, tprint=False):
-        # from: https://github.com/CyberGrandChallenge/readcgcef/blob/master/readcgcef-minimal.py
-        header_size = 16 + 2*2 + 4*5 + 2*6
-        buf = self.ncontent[0:header_size]
-        (cgcef_type, cgcef_machine, cgcef_version, cgcef_entry, cgcef_phoff,
-            cgcef_shoff, cgcef_flags, cgcef_ehsize, cgcef_phentsize, cgcef_phnum,
-            cgcef_shentsize, cgcef_shnum, cgcef_shstrndx) = struct.unpack("<xxxxxxxxxxxxxxxxHHLLLLLHHHHHH", buf)
-        phent_size = 8 * 4
-        assert cgcef_phnum != 0
-        assert cgcef_phentsize == phent_size
-
-        pt_types = {0: "NULL", 1: "LOAD", 6: "PHDR", 0x60000000+0x474e551: "GNU_STACK", 0x6ccccccc: "CGCPOV2"}
+        elf = ELFHeader(self.project)
+        elf.parse_header(self.ncontent)
         segments = []
-        for i in range(0, cgcef_phnum):
-            hdr = self.ncontent[cgcef_phoff + phent_size * i:cgcef_phoff + phent_size * i + phent_size]
-            (p_type, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_flags, p_align) = struct.unpack("<IIIIIIII", hdr)
-
-            assert p_type in pt_types
-            ptype_str = pt_types[p_type]
-
-            segments.append((p_type, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_flags, p_align))
-
+        buf = self.ncontent[elf.e_phoff:]
+        for x in range(0, elf.e_phnum):
+            segment = SegmentHeader(self.project)
+            segment.parse_header(buf[elf.e_phentsize * x:])
             if tprint:
-                print("---")
-                print("Loc:" + hex(cgcef_phoff + phent_size * i))
-                print("Type: %s" % ptype_str)
-                print("Permissions: %s" % self.pflags_to_perms(p_flags))
-                print("Memory: 0x%x + 0x%x" % (p_vaddr, p_memsz))
-                print("File: 0x%x + 0x%x" % (p_offset, p_filesz))
-                print(map(hex,(p_type, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_flags, p_align)))
-
+                segment.dbg_repr(elf.e_phoff, x)
+            segments.append(segment)
         self.segments = segments
         return segments
 
@@ -547,7 +541,7 @@ class DetourBackend(Backend):
                     mov esi, _to_init_data
                     mov edi, %s
                     mov ecx, %d
-                    cld 
+                    cld
                     rep movsb
                 ''' % (",".join([hex(x) for x in self.to_init_data]), \
                         hex(self.name_map["ADDED_DATA_START"] + self.added_rwdata_len), \
@@ -592,7 +586,7 @@ class DetourBackend(Backend):
         # 3) AddEntryPointPatch
         # basically like AddCodePatch but we detour by changing oep
         # and we jump at the end of all of them
-        # resolving symbols 
+        # resolving symbols
         if any([isinstance(p, AddEntryPointPatch) for p in patches]):
             pre_entrypoint_code_position = self.get_current_code_position()
             current_symbol_pos = self.get_current_code_position()
@@ -693,7 +687,7 @@ class DetourBackend(Backend):
                 AddRWDataPatch,AddRODataPatch,AddRWInitDataPatch]
         if any([isinstance(p,ins) for ins in header_patches for p in self.added_patches]) or \
                 any([isinstance(p,SegmentHeaderPatch) for p in patches]) or self.pdf_removed:
-            # either implicitly (because of a patch adding code or data) or explicitly, we need to change segment headers 
+            # either implicitly (because of a patch adding code or data) or explicitly, we need to change segment headers
 
             # 6) SegmentHeaderPatch
             segment_header_patches = [p for p in patches if isinstance(p,SegmentHeaderPatch)]
