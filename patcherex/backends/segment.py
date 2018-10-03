@@ -144,6 +144,15 @@ class ELFHeader(object):
     def e_shstrndx(self, val):
         self.header['e_shstrndx'] = val
 
+    def raw(self):
+        # Skip the first 16 magic bytes
+        pack_str = self.unpack_str.replace('x', '')
+        return struct.pack(pack_str, self.e_type, self.e_machine,
+                           self.e_version, self.e_entry, self.e_phoff,
+                           self.e_shoff, self.e_flags, self.e_ehsize,
+                           self.e_phentsize, self.e_phnum, self.e_shentsize,
+                           self.e_shnum, self.e_shstrndx)
+
     def parse_header(self, buf):
         '''
         Parse the ELF header which should be in buf
@@ -267,7 +276,7 @@ class SegmentHeader(object):
     def dbg_repr(self, off, x):
         print("---")
         print("Loc:" + hex(off + self.header_size * x))
-        print("Type: %s" % self.ptype_str)
+        print("Type: %s" % self.pt_types[self.p_type])
         print("Permissions: %s" % utils.pflags_to_perms(self.p_flags))
         print("Memory: 0x%x + 0x%x" % (self.p_vaddr, self.p_memsz))
         print("File: 0x%x + 0x%x" % (self.p_offset, self.p_filesz))
@@ -290,3 +299,14 @@ class SegmentHeader(object):
                                            buf[:self.header_size])
 
         return self.header_size
+
+    def raw(self):
+        # Here the packing and unpacking are done with the same strings
+        if self.bits == 32:
+            return struct.pack(self.unpack_str, self.p_type, self.p_offset,
+                               self.p_vaddr, self.p_paddr, self.p_filesz,
+                               self.p_memsz, self.p_flags, self.p_align)
+        elif self.bits == 64:
+            return struct.pack(self.unpack_str, self.p_type, self.p_flags,
+                               self.p_offset, self.p_vaddr, self.p_paddr,
+                               self.p_filesz, self.p_memsz, self.p_align)
