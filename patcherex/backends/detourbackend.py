@@ -9,7 +9,7 @@ from collections import defaultdict
 from patcherex.patches import *
 
 from ..backend import Backend
-from .segment import ELFHeader, SegmentHeader
+from .segment import *
 from .misc import ASM_ENTRY_POINT_PUSH_ENV, ASM_ENTRY_POINT_RESTORE_ENV
 
 l = logging.getLogger("patcherex.backends.DetourBackend")
@@ -63,7 +63,7 @@ class DuplicateLabelsException(PatchingException):
 
 class DetourBackend(Backend):
     # how do we want to design this to track relocations in the blocks...
-    def __init__(self, filename, data_fallback=None, try_pdf_removal=True):
+    def __init__(self, filename, data_fallback=None, try_pdf_removal=False):
 
         super(DetourBackend, self).__init__(filename, try_pdf_removal)
 
@@ -71,13 +71,14 @@ class DetourBackend(Backend):
         self.ordered_nodes = self._get_ordered_nodes(self.cfg)
 
         # header stuff
-        self.file_header = None
         self.ncontent = self.ocontent
         self.segments = None
+        self.sections = None
+        self.file_header = None
         self.original_header_end = None
 
         # tag to track if already patched
-        self.patched_tag = b"SHELLPHISH\x00"  # should not be longer than 0x20
+        self.patched_tag = b"SHELLPHISH\x00"
 
         self.name_map = RejectingDict()
 
@@ -92,23 +93,28 @@ class DetourBackend(Backend):
         self.max_convertible_address = 0xffffffff
 
         self.saved_states = OrderedDict()
-        # not all the touched bytes are bad, they are only a serious problem in case of InsertCodePatch
+        # not all the touched bytes are bad, they are only a serious problem
+        # in case of InsertCodePatch
         self.touched_bytes = set()
         self.modded_segments = self.dump_segments()
+        # self.dump_sections()
 
         # where to put the segments in memory
         self.added_code_segment = 0x07000000
         self.added_data_segment = 0x08000000
         self.single_segment_header_size = self.segments[0].header_size
-        # we may need up to 3 additional segments (1 for pdf removal 2 for patching)
+        # we may need up to 3 additional segments
+        # (1 for pdf removal 2 for patching)
         self.additional_headers_size = 3*self.single_segment_header_size
 
         if self.try_pdf_removal is True:
             l.info("Trying to remove the pdf from the binary")
-            should_remove_pdf, pdf_start, pdf_length, check_instruction_addr, check_instruction_size = self.find_pdf()
+            should_remove_pdf, pdf_start, pdf_length, check_instruction_addr,
+            check_instruction_size = self.find_pdf()
             if should_remove_pdf:
                 l.info("Removing the pdf from the binary")
-                self.remove_pdf(pdf_start, pdf_length, check_instruction_addr, check_instruction_size)
+                self.remove_pdf(pdf_start, pdf_length, check_instruction_addr,
+                                check_instruction_size)
                 self.pdf_removed = True
             else:
                 l.warning("I cannot remove the pdf from this binary")
@@ -301,8 +307,60 @@ class DetourBackend(Backend):
         self.modded_segments = segments[:-1] + [pre_cut_segment,post_cut_segment]
 
     def is_patched(self):
-        tag = self.ncontent[self.file_header.header_size:self.file_header.header_size + len(self.patched_tag)]
+        tag = self.ncontent[self.file_header.header_size:
+                            self.file_header.header_size+len(self.patched_tag)]
         return tag == self.patched_tag
+
+    def set_added_segment_headers(self, nsegments):
+        assert self.is_patched()
+        if self.data_fallback:
+            l.debug("added_data_file_start: %#x", self.added_data_file_start)
+        added_segments = 0
+        original_nsegments = nsegments
+
+        # if the size of a segment is zero, the kernel does not allocate any
+        # memory. So, we don't care about empty segments
+        if self.data_fallback:
+            mem_data_location = self.name_map["ADDED_DATA_START"]
+            data_segment_header = SegmentHeader(self.project)
+            data_segment_header.p_type = 1
+            data_segment_header.p_offset = self.added_data_file_start
+            data_segment_header.p_vaddr = mem_data_location
+            data_segment_header.p_paddr = mem_data_location
+            data_segment_header.p_filesz = len(self.added_data)
+            data_segment_header.p_memsz = len(self.added_data)
+            data_segment_header.p_flags = 0x6
+            data_segment_header.p_align = 0x1000
+
+            self.ncontent = utils.bytes_overwrite(self.ncontent,
+                                                  data_segment_header.raw(),
+                                                  self.original_header_end+32)
+            # added_segments += 1
+        else:
+            pass
+            # in this case the header has been already patched before
+
+        code_location = self.added_code_segment
+        code_location += (self.added_code_file_start % 0x1000)
+        code_segment_header = SegmentHeader(self.project)
+        code_segment_header.p_type = 1
+        code_segment_header.p_offset = self.added_code_file_start
+        code_segment_header.p_vaddr = code_location
+        code_segment_header.p_paddr = code_location
+        code_segment_header.p_filesz = len(self.added_code)
+        code_segment_header.p_memsz = len(self.added_code)
+        code_segment_header.p_flags = 0x5
+        code_segment_header.p_align = 0x1000
+
+        self.ncontent = utils.bytes_overwrite(self.ncontent,
+                                              code_segment_header.raw(),
+                                              self.original_header_end)
+        # added_segments += 1
+
+        # print original_nsegments,added_segments
+        self.file_header.e_phnum = original_nsegments + added_segments
+        self.ncontent = utils.bytes_overwrite(self.ncontent,
+                                              self.file_header.raw(), 0x10)
 
     def setup_headers(self, segments):
         if self.is_patched():
@@ -332,6 +390,14 @@ class DetourBackend(Backend):
         # Additionally added program headers have been already copied by the for loop above
         self.ncontent = self.ncontent.ljust(len(self.ncontent)+self.additional_headers_size, b"\x00")
 
+    def setup_section(self):
+        self.ncontent = utils.pad_bytes(self.ncontent, 0x10)
+        self.file_header.e_shoff = len(self.ncontent)
+        self.ncontent = utils.bytes_overwrite(self.ncontent,
+                                              self.file_header.raw(), 0x10)
+        for section in self.sections:
+            self.ncontent = utils.bytes_overwrite(self.ncontent, section.raw())
+
     def dump_segments(self, tprint=False):
         # Parse file header first
         elf = ELFHeader(self.project)
@@ -351,61 +417,23 @@ class DetourBackend(Backend):
         self.segments = segments
         return segments
 
-    def set_added_segment_headers(self, nsegments):
-        assert self.is_patched()
-        if self.data_fallback:
-            l.debug("added_data_file_start: %#x", self.added_data_file_start)
-        added_segments = 0
-        original_nsegments = nsegments
+    def dump_sections(self, tprint=False):
+        if self.file_header is None:
+            self.file_header = ELFHeader(self.project)
+            self.file_header.parse_header(self.ncontent)
 
-        # if the size of a segment is zero, the kernel does not allocate any memory
-        # so, we don't care about empty segments
-        if self.data_fallback:
-            mem_data_location = self.name_map["ADDED_DATA_START"]
-            data_segment_header = SegmentHeader(self.project)
-            data_segment_header.p_type = 1
-            data_segment_header.p_offset = self.added_data_file_start
-            data_segment_header.p_vaddr = mem_data_location
-            data_segment_header.p_paddr = mem_data_location
-            data_segment_header.p_filesz = len(self.added_data)
-            data_segment_header.p_memsz = len(self.added_data)
-            data_segment_header.p_flags = 0x6
-            data_segment_header.p_align = 0x1000
-            '''
-            data_segment_header = (1, self.added_data_file_start, mem_data_location, mem_data_location,
-                                   len(self.added_data), len(self.added_data), 0x6, 0x1000)  # RW
-            '''
-            self.ncontent = utils.bytes_overwrite(self.ncontent,
-                                                  data_segment_header.raw(),
-                                                  self.original_header_end+32)
-            added_segments += 1
-        else:
-            pass
-            # in this case the header has been already patched before
+        elf = self.file_header
+        sections = []
+        buf = self.ncontent[elf.e_shoff:]
+        for x in range(0, elf.e_shnum):
+            section = SectionHeader(self.project)
+            section.parse_header(buf[elf.e_shentsize * x:])
+            if tprint:
+                section.dbg_repr(elf.e_shoff, x)
+            sections.append(section)
 
-        mem_code_location = self.added_code_segment + (self.added_code_file_start % 0x1000)
-        code_segment_header = SegmentHeader(self.project)
-        code_segment_header.p_type = 1
-        code_segment_header.p_offset = self.added_code_file_start
-        code_segment_header.p_vaddr = mem_code_location
-        code_segment_header.p_paddr = mem_code_location
-        code_segment_header.p_filesz = len(self.added_code)
-        code_segment_header.p_memsz = len(self.added_code)
-        code_segment_header.p_flags = 0x5
-        code_segment_header.p_align = 0x1000
-        '''
-        code_segment_header = (1, self.added_code_file_start, mem_code_location, mem_code_location,
-                               len(self.added_code), len(self.added_code), 0x5, 0x1000)  # RX
-        '''
-        self.ncontent = utils.bytes_overwrite(self.ncontent,
-                                              code_segment_header.raw(),
-                                              self.original_header_end)
-        added_segments += 1
-
-        # print original_nsegments,added_segments
-        self.file_header.e_phnum = original_nsegments + added_segments
-        self.ncontent = utils.bytes_overwrite(self.ncontent,
-                                              self.file_header.raw(), 0x10)
+        self.sections = sections
+        return sections
 
     @staticmethod
     def pflags_to_perms(p_flags):
@@ -757,6 +785,7 @@ class DetourBackend(Backend):
                 '''
             self.setup_headers(segments)
             self.set_added_segment_headers(len(segments))
+            # self.setup_section()
             l.debug("final symbol table: "+ repr([(k,hex(v)) for k,v in self.name_map.items()]))
         else:
             l.info("no patches, the binary will not be touched")

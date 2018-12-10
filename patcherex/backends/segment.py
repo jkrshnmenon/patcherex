@@ -310,3 +310,128 @@ class SegmentHeader(object):
             return struct.pack(self.unpack_str, self.p_type, self.p_flags,
                                self.p_offset, self.p_vaddr, self.p_paddr,
                                self.p_filesz, self.p_memsz, self.p_align)
+
+
+class SectionHeader(object):
+    def __init__(self, project):
+        self.header = {'sh_name': 0,
+                       'sh_type': 0,
+                       'sh_flags': 0,
+                       'sh_addr': 0,
+                       'sh_offset': 0,
+                       'sh_size': 0,
+                       'sh_link': 0,
+                       'sh_info': 0,
+                       'sh_addralign': 0,
+                       'sh_entsize': 0}
+        self.bits = project.arch.bits
+
+        self.unpack_str = '<' + 'L' * 2
+
+        if self.bits == 32:
+            self.header_size = 0x28
+            self.unpack_str += 'L' * 8
+        elif self.bits == 64:
+            self.header_size = 0x40
+            self.unpack_str += 'Q' * 4 + 'L' * 2 + 'Q' * 2
+
+    @property
+    def sh_name(self):
+        return self.header['sh_name']
+
+    @sh_name.setter
+    def sh_name(self, val):
+        self.header['sh_name'] = val
+
+    @property
+    def sh_type(self):
+        return self.header['sh_type']
+
+    @sh_type.setter
+    def sh_type(self, val):
+        self.header['sh_type'] = val
+
+    @property
+    def sh_flags(self):
+        return self.header['sh_flags']
+
+    @sh_flags.setter
+    def sh_flags(self, val):
+        self.header['sh_flags'] = val
+
+    @property
+    def sh_addr(self):
+        return self.header['sh_addr']
+
+    @sh_addr.setter
+    def sh_addr(self, val):
+        self.header['sh_addr'] = val
+
+    @property
+    def sh_offset(self):
+        return self.header['sh_offset']
+
+    @sh_offset.setter
+    def sh_offset(self, val):
+        self.header['sh_offset'] = val
+
+    @property
+    def sh_size(self):
+        return self.header['sh_size']
+
+    @sh_size.setter
+    def sh_size(self, val):
+        self.header['sh_size'] = val
+
+    @property
+    def sh_link(self):
+        return self.header['sh_link']
+
+    @sh_link.setter
+    def sh_link(self, val):
+        self.header['sh_link'] = val
+
+    @property
+    def sh_info(self):
+        return self.header['sh_info']
+
+    @sh_info.setter
+    def sh_info(self, val):
+        self.header['sh_info'] = val
+
+    @property
+    def sh_addralign(self):
+        return self.header['sh_addralign']
+
+    @sh_addralign.setter
+    def sh_addralign(self, val):
+        self.header['sh_addralign'] = val
+
+    @property
+    def sh_entsize(self):
+        return self.header['sh_entsize']
+
+    @sh_entsize.setter
+    def sh_entsize(self, val):
+        self.header['sh_entsize'] = val
+
+    def dbg_repr(self, off, x):
+        print("---")
+        print("Loc:" + hex(off + self.header_size * x))
+
+    def parse_header(self, buf):
+        assert len(buf) >= self.header_size
+
+        (self.sh_name, self.sh_type, self.sh_flags,
+         self.sh_addr, self.sh_offset, self.sh_size,
+         self.sh_link, self.sh_info, self.sh_addralign,
+         self.sh_entsize) = struct.unpack(self.unpack_str,
+                                          buf[:self.header_size])
+
+        return self.header_size
+
+    def raw(self):
+        return struct.pack(self.unpack_str, self.sh_name, self.sh_type,
+                           self.sh_flags, self.sh_addr, self.sh_offset,
+                           self.sh_size, self.sh_link, self.sh_info,
+                           self.sh_addralign, self.sh_entsize)
